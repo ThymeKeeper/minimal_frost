@@ -2205,9 +2205,7 @@ impl Editor {
     pub fn handle_key_event(&mut self, key: crossterm::event::KeyEvent, viewport_height: usize) -> io::Result<()> {
         // Use the width of the viewport - for now we'll use a reasonable default
         let viewport_width = 80; // This should be calculated based on actual pane width
-        // For now, we'll implement basic key handling directly
-        // This should eventually call the proper handle_editor_key function
-        Ok(())
+        handle_editor_key(self, key, viewport_width, viewport_height)
     }
 }
 
@@ -2841,7 +2839,7 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>) -> io::Result<()> {
     }
 }
 
-fn handle_editor_key(editor: &mut Editor, key: event::KeyEvent, viewport_width: usize, viewport_height: usize) -> io::Result<()> {
+pub fn handle_editor_key(editor: &mut Editor, key: event::KeyEvent, viewport_width: usize, viewport_height: usize) -> io::Result<()> {
     match key.code {
         KeyCode::Char('a') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
             editor.select_all();

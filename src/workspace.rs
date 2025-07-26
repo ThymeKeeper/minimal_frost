@@ -13,7 +13,6 @@ use std::{
 };
 use crossterm::{
     event::{self, Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent},
-    cursor::SetCursorStyle,
     execute,
 };
 #[cfg(target_os = "windows")]
@@ -27,6 +26,8 @@ use ratatui::{
     widgets::{Block, Borders},
 };
 use anyhow::Result;
+
+const MIN_ROWS: i16 = 3;
 
 pub struct Workspace {
     pub editor: Editor,
@@ -44,7 +45,11 @@ pub struct Workspace {
     current_stmt: Arc<Mutex<Option<SafeStmt>>>,
     
     // Layout
-    split_ratio: u16, // Percentage for editor (0-100)
+    split_offset: i16,
+    min_split_offset: i16,
+    max_split_offset: i16,
+    results_hidden: bool,
+    editor_hidden: bool,
 }
 
 impl Workspace {
@@ -63,7 +68,11 @@ impl Workspace {
             db_req_tx,
             db_resp_rx,
             current_stmt,
-            split_ratio: 60, // 60% editor, 40% results
+            split_offset: 0,
+            min_split_offset: -20,
+            max_split_offset: 20,
+            results_hidden: false,
+            editor_hidden: false,
         }
     }
     
@@ -125,20 +134,38 @@ impl Workspace {
     fn draw(&mut self, f: &mut Frame) {
         let size = f.area();
         
-        // Split horizontally: editor | results
+        // Calculate constraints based on split_offset
+        let editor_percent = ((50 + self.split_offset) as u16).clamp(20, 80);
+        let results_percent = 100 - editor_percent;
+        
+        let constraints = if self.results_hidden {
+            vec![Constraint::Percentage(100)]
+        } else if self.editor_hidden {
+            vec![Constraint::Percentage(0), Constraint::Percentage(100)]
+        } else {
+            vec![
+                Constraint::Percentage(editor_percent),
+                Constraint::Percentage(results_percent),
+            ]
+        };
+        
+        // Split vertically: editor on top, results below
         let chunks = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Percentage(self.split_ratio),
-                Constraint::Percentage(100 - self.split_ratio),
-            ])
+            .direction(Direction::Vertical)
+            .constraints(constraints)
             .split(size);
         
-        // Draw editor in left pane
-        self.draw_editor(f, chunks[0]);
+        // Draw editor if not hidden
+        if !self.editor_hidden && !chunks.is_empty() {
+            self.draw_editor(f, chunks[0]);
+        }
         
-        // Draw results in right pane
-        self.results.render(f, chunks[1], self.focus == Focus::Results);
+        // Draw results if not hidden
+        if !self.results_hidden && chunks.len() > 1 {
+            self.results.render(f, chunks[1], self.focus == Focus::Results);
+        } else if !self.results_hidden && self.editor_hidden {
+            self.results.render(f, chunks[0], self.focus == Focus::Results);
+        }
     }
     
     fn draw_editor(&mut self, f: &mut Frame, area: Rect) {
@@ -162,15 +189,22 @@ impl Workspace {
         let content = self.editor.rope.to_string();
         let paragraph = Paragraph::new(content);
         f.render_widget(paragraph, inner);
+        
+        // Show cursor if editor is focused
+        if self.focus == Focus::Editor {
+            // Calculate cursor position
+            // This is simplified - the texteditor has more complex cursor positioning
+            f.set_cursor_position((inner.x + 1, inner.y + 1));
+        }
     }
     
     fn handle_key(&mut self, key: KeyEvent) -> io::Result<bool> {
         // Global keys
-        match key.code {
-            KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+        match (key.code, key.modifiers) {
+            (KeyCode::Char('q'), KeyModifiers::CONTROL) => {
                 return Ok(true); // Exit
             }
-            KeyCode::Tab if key.modifiers.is_empty() => {
+            (KeyCode::Tab, KeyModifiers::NONE) => {
                 // Switch focus
                 self.focus = match self.focus {
                     Focus::Editor => Focus::Results,
@@ -179,12 +213,45 @@ impl Workspace {
                 };
                 return Ok(false);
             }
-            KeyCode::Enter if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            (KeyCode::Enter, KeyModifiers::CONTROL) => {
                 self.run_query();
                 return Ok(false);
             }
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) && self.running => {
+            (KeyCode::Char('c'), KeyModifiers::CONTROL) if self.running => {
                 self.cancel_query();
+                return Ok(false);
+            }
+            // Alt+Arrow keys for resizing
+            (KeyCode::Up, KeyModifiers::ALT) => {
+                if !self.results_hidden {
+                    self.split_offset = (self.split_offset + 5).min(self.max_split_offset);
+                }
+                return Ok(false);
+            }
+            (KeyCode::Down, KeyModifiers::ALT) => {
+                if !self.results_hidden {
+                    self.split_offset = (self.split_offset - 5).max(self.min_split_offset);
+                }
+                return Ok(false);
+            }
+            (KeyCode::Left, KeyModifiers::ALT) => {
+                // Hide results (show editor only)
+                self.results_hidden = true;
+                self.editor_hidden = false;
+                self.focus = Focus::Editor;
+                return Ok(false);
+            }
+            (KeyCode::Right, KeyModifiers::ALT) => {
+                // Hide editor (show results only)
+                self.results_hidden = false;
+                self.editor_hidden = true;
+                self.focus = Focus::Results;
+                return Ok(false);
+            }
+            (KeyCode::Char(' '), KeyModifiers::ALT) => {
+                // Show both panes
+                self.results_hidden = false;
+                self.editor_hidden = false;
                 return Ok(false);
             }
             _ => {}
