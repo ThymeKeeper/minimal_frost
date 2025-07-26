@@ -3,7 +3,7 @@ use crate::{
     connection::{DbWorkerRequest, DbWorkerResponse, SafeStmt, start_db_worker},
     focus::Focus,
     results::{Results, ResultsTab, ResultsContent},
-    texteditor::Editor,
+    texteditor::{Editor, AppState},
 };
 use std::{
     sync::{Arc, Mutex},
@@ -23,9 +23,8 @@ use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Style},
-    widgets::{Block, Borders},
+    widgets::{Block, Borders, Paragraph},
 };
-use anyhow::Result;
 
 const MIN_ROWS: i16 = 3;
 
@@ -87,6 +86,11 @@ impl Workspace {
         execute!(io::stdout(), crossterm::terminal::SetTitle("Minimal Frost"))?;
         
         loop {
+            // Check if editor wants to exit
+            if let AppState::Exiting = self.editor.app_state {
+                break;
+            }
+            
             // Poll for database responses
             self.poll_db_responses();
             
@@ -105,7 +109,7 @@ impl Workspace {
                             }
                         }
                         
-                        if self.handle_key(key)? {
+                        if self.handle_key(key, terminal)? {
                             break; // Exit
                         }
                     }
@@ -169,8 +173,12 @@ impl Workspace {
     }
     
     fn draw_editor(&mut self, f: &mut Frame, area: Rect) {
-        // Use texteditor's draw_ui function but in our allocated area
-        // We need to wrap it in a border to match our UI style
+        // For now, use the texteditor's draw_ui directly
+        // This isn't perfect but will work
+        
+        // The texteditor expects to draw on the full frame
+        // So we need to create a temporary solution
+        // For now, just draw a border and show the content
         let block = Block::default()
             .borders(Borders::ALL)
             .title("SQL Editor")
@@ -183,26 +191,30 @@ impl Workspace {
         let inner = block.inner(area);
         f.render_widget(block, area);
         
-        // Now draw the editor content inside
-        // For now, just show the text content
-        use ratatui::widgets::Paragraph;
+        // Simple text display for now
         let content = self.editor.rope.to_string();
         let paragraph = Paragraph::new(content);
         f.render_widget(paragraph, inner);
         
         // Show cursor if editor is focused
-        if self.focus == Focus::Editor {
-            // Calculate cursor position
-            // This is simplified - the texteditor has more complex cursor positioning
-            f.set_cursor_position((inner.x + 1, inner.y + 1));
+        if self.focus == Focus::Editor && !self.editor_hidden {
+            // Set a simple cursor position
+            if let Some((line, col)) = self.editor.get_position() {
+                // Very simplified - doesn't account for viewport offset
+                let cursor_x = inner.x + col.min(inner.width as usize - 1) as u16;
+                let cursor_y = inner.y + line.min(inner.height as usize - 1) as u16;
+                f.set_cursor_position((cursor_x, cursor_y));
+            }
         }
     }
     
-    fn handle_key(&mut self, key: KeyEvent) -> io::Result<bool> {
-        // Global keys
+    fn handle_key<B: Backend>(&mut self, key: KeyEvent, terminal: &mut Terminal<B>) -> io::Result<bool> {
+        // Global keys first
         match (key.code, key.modifiers) {
             (KeyCode::Char('q'), KeyModifiers::CONTROL) => {
-                return Ok(true); // Exit
+                // Set editor to exiting state
+                self.editor.app_state = AppState::Exiting;
+                return Ok(true);
             }
             (KeyCode::Tab, KeyModifiers::NONE) => {
                 // Switch focus
@@ -260,9 +272,14 @@ impl Workspace {
         // Route to focused pane
         match self.focus {
             Focus::Editor => {
-                // Get viewport height for editor
-                let viewport_height = 20; // TODO: Calculate actual height
-                self.editor.handle_key_event(key, viewport_height)?;
+                // Use the texteditor's key handling through our simplified interface
+                // Get the terminal size for viewport calculations
+                let size = terminal.size()?;
+                let viewport_height = size.height.saturating_sub(2) as usize; // Account for borders
+                let viewport_width = size.width.saturating_sub(2) as usize;
+                
+                // Call handle_editor_key directly
+                crate::texteditor::handle_editor_key(&mut self.editor, key, viewport_width, viewport_height)?;
             }
             Focus::Results => {
                 self.results.handle_key(key);

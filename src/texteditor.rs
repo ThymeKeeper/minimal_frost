@@ -838,7 +838,7 @@ impl Prompt {
     }
 }
 
-enum AppState {
+pub enum AppState {
     Editing,
     Prompting(Prompt),
     Exiting,
@@ -2018,7 +2018,7 @@ impl Editor {
         }
     }
 
-    fn get_position(&self) -> (usize, usize) {
+    pub fn get_position(&self) -> (usize, usize) {
         let char_idx = self.rope.byte_to_char(self.caret);
         let line = self.rope.char_to_line(char_idx);
         let line_start = self.rope.line_to_char(line);
@@ -2202,83 +2202,6 @@ impl Editor {
         self.current_match_index = None;
     }
     
-    pub fn handle_key_event(&mut self, key: crossterm::event::KeyEvent, viewport_height: usize) -> io::Result<()> {
-        // Use the width of the viewport - for now we'll use a reasonable default
-        let viewport_width = 80; // This should be calculated based on actual pane width
-        // We need to import the key handling logic here directly to avoid forward reference issues
-        // For now, let's implement a basic version that allows typing
-        use crossterm::event::{KeyCode, KeyModifiers};
-        
-        match key.code {
-            KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.insert_char(ch);
-                self.update_viewport(viewport_height, viewport_width);
-            }
-            KeyCode::Enter => {
-                self.insert_char('\n');
-                self.update_viewport(viewport_height, viewport_width);
-            }
-            KeyCode::Backspace => {
-                self.delete_char_before();
-                self.update_viewport(viewport_height, viewport_width);
-            }
-            KeyCode::Delete => {
-                self.delete_char_after();
-                self.update_viewport(viewport_height, viewport_width);
-            }
-            KeyCode::Left => {
-                self.move_caret_left();
-                self.update_viewport(viewport_height, viewport_width);
-            }
-            KeyCode::Right => {
-                self.move_caret_right();
-                self.update_viewport(viewport_height, viewport_width);
-            }
-            KeyCode::Up => {
-                self.move_caret_up(viewport_height);
-                self.update_viewport(viewport_height, viewport_width);
-            }
-            KeyCode::Down => {
-                self.move_caret_down(viewport_height);
-                self.update_viewport(viewport_height, viewport_width);
-            }
-            KeyCode::Home => {
-                self.move_to_line_start();
-                self.update_viewport(viewport_height, viewport_width);
-            }
-            KeyCode::End => {
-                self.move_to_line_end();
-                self.update_viewport(viewport_height, viewport_width);
-            }
-            KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.select_all();
-                self.update_viewport(viewport_height, viewport_width);
-            }
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.copy();
-            }
-            KeyCode::Char('x') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                if self.cut() {
-                    self.update_viewport(viewport_height, viewport_width);
-                }
-            }
-            KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.paste();
-                self.update_viewport(viewport_height, viewport_width);
-            }
-            KeyCode::Char('z') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.undo();
-                self.update_viewport(viewport_height, viewport_width);
-            }
-            KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.redo();
-                self.update_viewport(viewport_height, viewport_width);
-            }
-            _ => {}
-        }
-        
-        Ok(())
-    }
 }
 
 // Main function removed - this is now a module
