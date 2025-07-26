@@ -1,19 +1,30 @@
 use crate::{
     config::Config,
     connection::{DbWorkerRequest, DbWorkerResponse, SafeStmt, start_db_worker},
-    editor::Editor,
     focus::Focus,
-    results::Results,
+    results::{Results, ResultsTab, ResultsContent},
+    texteditor::Editor,
 };
 use std::{
     sync::{Arc, Mutex},
     sync::mpsc::{Receiver, Sender},
     time::{Duration, Instant},
+    io,
 };
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent};
+use crossterm::{
+    event::{self, Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent},
+    cursor::SetCursorStyle,
+    execute,
+};
+#[cfg(target_os = "windows")]
+use crossterm::event::KeyEventKind;
 use ratatui::{
+    backend::Backend,
+    Terminal,
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
+    style::{Color, Style},
+    widgets::{Block, Borders},
 };
 use anyhow::Result;
 
@@ -33,9 +44,7 @@ pub struct Workspace {
     current_stmt: Arc<Mutex<Option<SafeStmt>>>,
     
     // Layout
-    split_offset: i16,
-    min_split_offset: i16,
-    max_split_offset: i16,
+    split_ratio: u16, // Percentage for editor (0-100)
 }
 
 impl Workspace {
@@ -54,117 +63,184 @@ impl Workspace {
             db_req_tx,
             db_resp_rx,
             current_stmt,
-            split_offset: 0,
-            min_split_offset: -20,
-            max_split_offset: 20,
+            split_ratio: 60, // 60% editor, 40% results
         }
     }
     
-    pub fn handle_key(&mut self, key: KeyEvent) -> Result<bool> {
-        // Check for quit
-        if key.code == KeyCode::Char('q') && key.modifiers.contains(KeyModifiers::CONTROL) {
-            return Ok(true);
+    pub fn run<B: Backend>(&mut self, terminal: &mut Terminal<B>) -> io::Result<()> {
+        // Windows-specific: Disable buffer optimization to force full redraws
+        #[cfg(target_os = "windows")]
+        {
+            terminal.autoresize()?;
         }
         
-        // Handle focus switching
-        if key.code == KeyCode::Tab && key.modifiers.is_empty() {
-            self.focus = match self.focus {
-                Focus::Editor => Focus::Results,
-                Focus::Results => Focus::Editor,
-                Focus::DbTree => Focus::Editor,
-            };
-            return Ok(false);
+        // Set title
+        execute!(io::stdout(), crossterm::terminal::SetTitle("Minimal Frost"))?;
+        
+        loop {
+            // Poll for database responses
+            self.poll_db_responses();
+            
+            // Draw UI
+            terminal.draw(|f| self.draw(f))?;
+            
+            // Handle events
+            if event::poll(Duration::from_millis(50))? {
+                match event::read()? {
+                    Event::Key(key) => {
+                        // On Windows, ignore key release events
+                        #[cfg(target_os = "windows")]
+                        {
+                            if key.kind == KeyEventKind::Release {
+                                continue;
+                            }
+                        }
+                        
+                        if self.handle_key(key)? {
+                            break; // Exit
+                        }
+                    }
+                    Event::Mouse(mouse) => {
+                        self.handle_mouse(mouse);
+                    }
+                    Event::Resize(_, _) => {
+                        #[cfg(target_os = "windows")]
+                        terminal.autoresize()?;
+                    }
+                    _ => {}
+                }
+            }
+            
+            // Update running timer
+            if self.running {
+                if let Some(started) = self.run_started {
+                    self.run_duration = Some(started.elapsed());
+                }
+            }
         }
         
-        // Handle running queries
-        if key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::CONTROL) {
-            self.run_query();
-            return Ok(false);
-        }
+        Ok(())
+    }
+    
+    fn draw(&mut self, f: &mut Frame) {
+        let size = f.area();
         
-        // Cancel running queries
-        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) && self.running {
-            self.cancel_query();
-            return Ok(false);
+        // Split horizontally: editor | results
+        let chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Percentage(self.split_ratio),
+                Constraint::Percentage(100 - self.split_ratio),
+            ])
+            .split(size);
+        
+        // Draw editor in left pane
+        self.draw_editor(f, chunks[0]);
+        
+        // Draw results in right pane
+        self.results.render(f, chunks[1], self.focus == Focus::Results);
+    }
+    
+    fn draw_editor(&mut self, f: &mut Frame, area: Rect) {
+        // Use texteditor's draw_ui function but in our allocated area
+        // We need to wrap it in a border to match our UI style
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title("SQL Editor")
+            .border_style(if self.focus == Focus::Editor {
+                Style::default().fg(Color::Cyan)
+            } else {
+                Style::default().fg(Color::Gray)
+            });
+        
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+        
+        // Now draw the editor content inside
+        // For now, just show the text content
+        use ratatui::widgets::Paragraph;
+        let content = self.editor.rope.to_string();
+        let paragraph = Paragraph::new(content);
+        f.render_widget(paragraph, inner);
+    }
+    
+    fn handle_key(&mut self, key: KeyEvent) -> io::Result<bool> {
+        // Global keys
+        match key.code {
+            KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                return Ok(true); // Exit
+            }
+            KeyCode::Tab if key.modifiers.is_empty() => {
+                // Switch focus
+                self.focus = match self.focus {
+                    Focus::Editor => Focus::Results,
+                    Focus::Results => Focus::Editor,
+                    Focus::DbTree => Focus::Editor,
+                };
+                return Ok(false);
+            }
+            KeyCode::Enter if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.run_query();
+                return Ok(false);
+            }
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) && self.running => {
+                self.cancel_query();
+                return Ok(false);
+            }
+            _ => {}
         }
         
         // Route to focused pane
         match self.focus {
-            Focus::Editor => self.editor.handle_key(key),
-            Focus::Results => self.results.handle_key(key),
+            Focus::Editor => {
+                // Get viewport height for editor
+                let viewport_height = 20; // TODO: Calculate actual height
+                self.editor.handle_key_event(key, viewport_height)?;
+            }
+            Focus::Results => {
+                self.results.handle_key(key);
+            }
             Focus::DbTree => {} // Not implemented yet
         }
         
         Ok(false)
     }
     
-    pub fn handle_mouse(&mut self, _mouse: MouseEvent) {
-        // TODO: Implement mouse handling
+    fn handle_mouse(&mut self, _mouse: MouseEvent) {
+        // TODO: Implement mouse handling for pane selection
     }
     
-    pub fn poll_db_responses(&mut self) -> bool {
-        let mut changed = false;
-        
+    fn poll_db_responses(&mut self) {
         while let Ok(response) = self.db_resp_rx.try_recv() {
             match response {
                 DbWorkerResponse::Connected => {
                     self.connected = true;
-                    changed = true;
                 }
-                DbWorkerResponse::QueryStarted { query_idx, started, query_context } => {
+                DbWorkerResponse::QueryStarted { query_idx: _, started, query_context } => {
                     self.running = true;
                     self.run_started = Some(started);
-                    changed = true;
+                    // Add pending tab
+                    let tab = ResultsTab::new_pending_with_start(query_context, started);
+                    self.results.tabs.push(tab);
+                    self.results.tab_idx = self.results.tabs.len() - 1;
                 }
-                DbWorkerResponse::QueryFinished { query_idx, elapsed, result } => {
+                DbWorkerResponse::QueryFinished { query_idx: _, elapsed: _, result } => {
                     self.running = false;
-                    self.run_duration = Some(elapsed);
                     self.results.add_result(result);
                     self.focus = Focus::Results;
-                    changed = true;
                 }
-                DbWorkerResponse::QueryError { query_idx, elapsed, message } => {
+                DbWorkerResponse::QueryError { query_idx: _, elapsed, message } => {
                     self.running = false;
                     self.run_duration = Some(elapsed);
-                    self.error = Some(message);
-                    changed = true;
+                    self.error = Some(message.clone());
+                    self.results.add_result(ResultsContent::Error {
+                        message,
+                        cursor: 0,
+                        selection: None,
+                    });
                 }
             }
         }
-        
-        changed
-    }
-    
-    pub fn update(&mut self) {
-        // Update running timer
-        if self.running {
-            if let Some(started) = self.run_started {
-                self.run_duration = Some(started.elapsed());
-            }
-        }
-    }
-    
-    pub fn render(&mut self, frame: &mut Frame) {
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Percentage(50),
-                Constraint::Percentage(50),
-            ])
-            .split(frame.area());
-        
-        // Render editor
-        self.editor.render(frame, chunks[0], self.focus == Focus::Editor);
-        
-        // Render results
-        self.results.render(frame, chunks[1], self.focus == Focus::Results);
-        
-        // Render status line
-        self.render_status(frame);
-    }
-    
-    fn render_status(&self, frame: &mut Frame) {
-        // TODO: Implement status line
     }
     
     fn run_query(&mut self) {
@@ -172,7 +248,7 @@ impl Workspace {
             return;
         }
         
-        let query = self.editor.get_current_query();
+        let query = self.get_current_query();
         if query.is_empty() {
             return;
         }
@@ -186,6 +262,19 @@ impl Workspace {
     fn cancel_query(&mut self) {
         if self.running {
             let _ = self.db_req_tx.send(DbWorkerRequest::Cancel);
+        }
+    }
+    
+    fn get_current_query(&self) -> String {
+        // Get selected text or entire content from editor
+        if self.editor.has_selection() {
+            if let Some((start, end)) = self.editor.get_selection_range() {
+                self.editor.rope.byte_slice(start..end).to_string()
+            } else {
+                String::new()
+            }
+        } else {
+            self.editor.rope.to_string()
         }
     }
 }
