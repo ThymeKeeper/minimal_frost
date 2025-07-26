@@ -2018,21 +2018,6 @@ impl Editor {
         }
     }
 
-    pub fn handle_key(&mut self, key: crossterm::event::KeyEvent, viewport_width: usize, viewport_height: usize) -> io::Result<()> {
-        // Simple implementation for now - just allow basic typing
-        use crossterm::event::{KeyCode, KeyModifiers};
-        
-        match key.code {
-            KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.insert_char(ch, viewport_width);
-            }
-            KeyCode::Enter => {
-                self.insert_char('\n', viewport_width);
-            }
-            _ => {}
-        }
-        Ok(())
-    }
     
     pub fn get_position(&self) -> (usize, usize) {
         let char_idx = self.rope.byte_to_char(self.caret);
@@ -2849,6 +2834,7 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>) -> io::Result<()> {
         }
     }
 }
+*/
 
 pub fn handle_editor_key(editor: &mut Editor, key: event::KeyEvent, viewport_width: usize, viewport_height: usize) -> io::Result<()> {
     match key.code {
@@ -2931,15 +2917,241 @@ pub fn handle_editor_key(editor: &mut Editor, key: event::KeyEvent, viewport_wid
     Ok(())
 }
 
-pub fn draw_ui(f: &mut Frame, editor: &mut Editor) {
+pub fn draw_ui(f: &mut Frame, editor: &mut Editor, area: Rect) {
     #[cfg(not(target_os = "windows"))]
     {
-        let viewport_height = f.area().height as usize - 1;
-        let viewport_width = f.area().width as usize;
+        let viewport_height = area.height as usize - 1;
+        let viewport_width = area.width as usize;
         editor.ensure_visual_lines(viewport_width);
         editor.update_viewport(viewport_height, viewport_width);
     }
-    draw_ui_with_cursor(f, editor, true);
+    draw_ui_with_cursor_in_area(f, editor, true, area);
+}
+
+fn draw_ui_with_cursor_in_area(f: &mut Frame, editor: &mut Editor, show_cursor: bool, area: Rect) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(0),
+            Constraint::Length(1),
+        ])
+        .split(area);
+    
+    let viewport_height = chunks[0].height as usize;
+    let viewport_width = chunks[0].width as usize;
+    
+    // Windows-specific: Check if viewport has changed or modal was just dismissed for more aggressive clearing
+    #[cfg(target_os = "windows")]
+    let viewport_changed = editor.viewport_offset != editor.previous_viewport_offset;
+    
+    #[cfg(target_os = "windows")]
+    let modal_dismissed = editor.modal_just_dismissed;
+    
+    // Viewport updating is now done before draw_ui is called
+    editor.ensure_visual_lines(viewport_width);
+    
+    #[cfg(target_os = "windows")]
+    {
+        // Only clear if viewport changed AND we're not showing a modal
+        // OR if a modal was just dismissed
+        let should_clear = modal_dismissed || (viewport_changed && matches!(editor.app_state, AppState::Editing));
+        
+        if should_clear {
+            // Clear each line in the editor area directly
+            for y in 0..viewport_height {
+                let _ = execute!(
+                    io::stdout(),
+                    MoveTo(chunks[0].x, chunks[0].y + y as u16),
+                    ClearType(CrosstermClearType::UntilNewLine)
+                );
+            }
+        }
+        editor.previous_viewport_offset = editor.viewport_offset;
+        editor.modal_just_dismissed = false;
+    }
+    
+    let selection_range = editor.get_selection_range();
+    
+    let mut lines = Vec::new();
+    let (caret_row, caret_col) = editor.get_visual_position(editor.caret, viewport_width);
+    
+    let start = editor.viewport_offset.0;
+    let end = (start + viewport_height).min(editor.visual_lines.len());
+    
+    for row in start..end {
+        if let Some(vline_opt) = editor.visual_lines.get(row) {
+            if let Some(vline) = vline_opt {
+                let text = editor.rope.byte_slice(vline.start_byte..vline.end_byte).to_string();
+                
+                let (display_text, display_start_offset) = if editor.word_wrap || editor.viewport_offset.1 == 0 {
+                    (text, 0)
+                } else {
+                    let mut result = String::new();
+                    let mut width = 0;
+                    let mut byte_offset = 0;
+                    let mut display_start_offset = 0;
+                    let mut found_start = false;
+                    
+                    for ch in text.chars() {
+                        let ch_width = ch.to_string().width();
+                        width += ch_width;
+                        
+                        if width > editor.viewport_offset.1 {
+                            if !found_start {
+                                display_start_offset = byte_offset;
+                                found_start = true;
+                            }
+                            result.push(ch);
+                        }
+                        
+                        byte_offset += ch.len_utf8();
+                    }
+                    (result, display_start_offset)
+                };
+                
+                let mut spans = vec![];
+                if vline.indent > 0 {
+                    spans.push(Span::raw(" ".repeat(vline.indent)));
+                }
+                
+                // Check for find matches in this line
+                let mut char_styles = vec![Style::default(); display_text.len()];
+                
+                // Apply selection highlighting
+                if let Some((sel_start, sel_end)) = selection_range {
+                    let line_start = vline.start_byte;
+                    let line_end = vline.end_byte;
+                    
+                    if sel_end > line_start && sel_start < line_end {
+                        let mut byte_pos = display_start_offset;
+                        for (i, ch) in display_text.chars().enumerate() {
+                            let global_pos = line_start + byte_pos;
+                            if global_pos >= sel_start && global_pos < sel_end {
+                                char_styles[i] = Style::default().bg(Color::Blue).fg(Color::White);
+                            }
+                            byte_pos += ch.len_utf8();
+                        }
+                    }
+                }
+                
+                // Apply find match highlighting
+                for (match_start, match_end) in &editor.find_matches {
+                    let line_start = vline.start_byte;
+                    let line_end = vline.end_byte;
+                    
+                    if *match_end > line_start && *match_start < line_end {
+                        let mut byte_pos = display_start_offset;
+                        for (i, ch) in display_text.chars().enumerate() {
+                            let global_pos = line_start + byte_pos;
+                            
+                            // Check if this is the current match
+                            let is_current = if let Some(idx) = editor.current_match_index {
+                                if let Some((current_start, current_end)) = editor.find_matches.get(idx) {
+                                    global_pos >= *current_start && global_pos < *current_end
+                                } else {
+                                    false
+                                }
+                            } else {
+                                false
+                            };
+                            
+                            if global_pos >= *match_start && global_pos < *match_end {
+                                if is_current {
+                                    char_styles[i] = Style::default().bg(Color::Green).fg(Color::Black);
+                                } else {
+                                    char_styles[i] = Style::default().bg(Color::Yellow).fg(Color::Black);
+                                }
+                            }
+                            
+                            byte_pos += ch.len_utf8();
+                        }
+                    }
+                }
+                
+                let mut current_style = Style::default();
+                let mut current_text = String::new();
+                
+                for (ch, style) in display_text.chars().zip(char_styles.iter()) {
+                    if *style != current_style {
+                        if !current_text.is_empty() {
+                            spans.push(Span::styled(current_text.clone(), current_style));
+                            current_text.clear();
+                        }
+                        current_style = *style;
+                    }
+                    current_text.push(ch);
+                }
+                
+                if !current_text.is_empty() {
+                    spans.push(Span::styled(current_text, current_style));
+                }
+                
+                lines.push(Line::from(spans));
+            } else {
+                lines.push(Line::from(""));
+            }
+        }
+    }
+    
+    while lines.len() < viewport_height {
+        lines.push(Line::from(""));
+    }
+    
+    let content = Paragraph::new(lines);
+    f.render_widget(content, chunks[0]);
+    
+    let status_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Min(20),
+            Constraint::Length(20),
+            Constraint::Length(20),
+        ])
+        .split(chunks[1]);
+    
+    let status_left = format!("{} {}", 
+        editor.get_display_name(),
+        if editor.modified { "[modified]" } else { "" }
+    );
+    
+    let status_center = format!("Ln {}, Col {}", caret_row + 1, caret_col + 1);
+    
+    let status_right = format!("{} lines", editor.rope.len_lines());
+    
+    f.render_widget(Paragraph::new(status_left), status_chunks[0]);
+    f.render_widget(
+        Paragraph::new(status_center).alignment(Alignment::Center),
+        status_chunks[1]
+    );
+    f.render_widget(
+        Paragraph::new(status_right).alignment(Alignment::Right),
+        status_chunks[2]
+    );
+    
+    if show_cursor && matches!(editor.app_state, AppState::Editing) {
+        let cursor_display_row = caret_row.saturating_sub(editor.viewport_offset.0);
+        let cursor_display_col = if caret_row < editor.visual_lines.len() && editor.visual_lines[caret_row].is_some() {
+            let vline = editor.visual_lines[caret_row].as_ref().unwrap();
+            caret_col + vline.indent - editor.viewport_offset.1
+        } else {
+            caret_col - editor.viewport_offset.1
+        };
+        
+        if cursor_display_row < viewport_height && cursor_display_col < viewport_width {
+            f.set_cursor_position((
+                chunks[0].x + cursor_display_col as u16,
+                chunks[0].y + cursor_display_row as u16,
+            ));
+        }
+    }
+    
+    match &editor.app_state {
+        AppState::Prompting(_prompt) => {
+            // TODO: Implement prompt drawing
+            // draw_prompt(f, editor, prompt);
+        }
+        _ => {}
+    }
 }
 
 fn draw_ui_with_cursor(f: &mut Frame, editor: &mut Editor, show_cursor: bool) {
@@ -3551,4 +3763,4 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(popup_layout[1])[1]
-}*/
+}

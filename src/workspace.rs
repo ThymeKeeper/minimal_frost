@@ -23,7 +23,7 @@ use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Style},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders},
 };
 
 const MIN_ROWS: i16 = 3;
@@ -173,12 +173,7 @@ impl Workspace {
     }
     
     fn draw_editor(&mut self, f: &mut Frame, area: Rect) {
-        // For now, use the texteditor's draw_ui directly
-        // This isn't perfect but will work
-        
-        // The texteditor expects to draw on the full frame
-        // So we need to create a temporary solution
-        // For now, just draw a border and show the content
+        // Draw border around editor area
         let block = Block::default()
             .borders(Borders::ALL)
             .title("SQL Editor")
@@ -188,23 +183,14 @@ impl Workspace {
                 Style::default().fg(Color::Gray)
             });
         
+        // Get the inner area (excluding borders) before rendering
         let inner = block.inner(area);
+        
+        // Render the block
         f.render_widget(block, area);
         
-        // Simple text display for now
-        let content = self.editor.rope.to_string();
-        let paragraph = Paragraph::new(content);
-        f.render_widget(paragraph, inner);
-        
-        // Show cursor if editor is focused
-        if self.focus == Focus::Editor && !self.editor_hidden {
-            // Set a simple cursor position
-            let (line, col) = self.editor.get_position();
-            // Very simplified - doesn't account for viewport offset
-            let cursor_x = inner.x + col.min(inner.width as usize - 1) as u16;
-            let cursor_y = inner.y + line.min(inner.height as usize - 1) as u16;
-            f.set_cursor_position((cursor_x, cursor_y));
-        }
+        // Use texteditor's draw_ui function directly on the inner area
+        crate::texteditor::draw_ui(f, &mut self.editor, inner);
     }
     
     fn handle_key<B: Backend>(&mut self, key: KeyEvent, terminal: &mut Terminal<B>) -> io::Result<bool> {
@@ -271,14 +257,37 @@ impl Workspace {
         // Route to focused pane
         match self.focus {
             Focus::Editor => {
-                // Use the texteditor's key handling through our simplified interface
-                // Get the terminal size for viewport calculations
+                // Get the current area where editor is drawn
                 let size = terminal.size()?;
-                let viewport_height = size.height.saturating_sub(2) as usize; // Account for borders
-                let viewport_width = size.width.saturating_sub(2) as usize;
+                let area = Rect::new(0, 0, size.width, size.height);
                 
-                // Use the editor's handle_key method
-                self.editor.handle_key(key, viewport_width, viewport_height)?;
+                // Calculate the editor area (same logic as in draw)
+                let editor_percent = ((50 + self.split_offset) as u16).clamp(20, 80);
+                let results_percent = 100 - editor_percent;
+                
+                let constraints = if self.results_hidden {
+                    vec![Constraint::Percentage(100)]
+                } else {
+                    vec![
+                        Constraint::Percentage(editor_percent),
+                        Constraint::Percentage(results_percent),
+                    ]
+                };
+                
+                let chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints(constraints)
+                    .split(area);
+                
+                if !chunks.is_empty() {
+                    // Account for the border (1 char on each side)
+                    let editor_area = chunks[0];
+                    let inner_width = editor_area.width.saturating_sub(2) as usize;
+                    let inner_height = editor_area.height.saturating_sub(2) as usize;
+                    
+                    // Use texteditor's handle_editor_key directly
+                    crate::texteditor::handle_editor_key(&mut self.editor, key, inner_width, inner_height)?;
+                }
             }
             Focus::Results => {
                 self.results.handle_key(key);
