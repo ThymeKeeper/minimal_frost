@@ -2018,6 +2018,22 @@ impl Editor {
         }
     }
 
+    pub fn handle_key(&mut self, key: crossterm::event::KeyEvent, viewport_width: usize, viewport_height: usize) -> io::Result<()> {
+        // Simple implementation for now - just allow basic typing
+        use crossterm::event::{KeyCode, KeyModifiers};
+        
+        match key.code {
+            KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.insert_char(ch, viewport_width);
+            }
+            KeyCode::Enter => {
+                self.insert_char('\n', viewport_width);
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+    
     pub fn get_position(&self) -> (usize, usize) {
         let char_idx = self.rope.byte_to_char(self.caret);
         let line = self.rope.char_to_line(char_idx);

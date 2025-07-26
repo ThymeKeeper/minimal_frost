@@ -199,12 +199,11 @@ impl Workspace {
         // Show cursor if editor is focused
         if self.focus == Focus::Editor && !self.editor_hidden {
             // Set a simple cursor position
-            if let Some((line, col)) = self.editor.get_position() {
-                // Very simplified - doesn't account for viewport offset
-                let cursor_x = inner.x + col.min(inner.width as usize - 1) as u16;
-                let cursor_y = inner.y + line.min(inner.height as usize - 1) as u16;
-                f.set_cursor_position((cursor_x, cursor_y));
-            }
+            let (line, col) = self.editor.get_position();
+            // Very simplified - doesn't account for viewport offset
+            let cursor_x = inner.x + col.min(inner.width as usize - 1) as u16;
+            let cursor_y = inner.y + line.min(inner.height as usize - 1) as u16;
+            f.set_cursor_position((cursor_x, cursor_y));
         }
     }
     
@@ -278,8 +277,8 @@ impl Workspace {
                 let viewport_height = size.height.saturating_sub(2) as usize; // Account for borders
                 let viewport_width = size.width.saturating_sub(2) as usize;
                 
-                // Call handle_editor_key directly
-                crate::texteditor::handle_editor_key(&mut self.editor, key, viewport_width, viewport_height)?;
+                // Use the editor's handle_key method
+                self.editor.handle_key(key, viewport_width, viewport_height)?;
             }
             Focus::Results => {
                 self.results.handle_key(key);
